@@ -8,8 +8,9 @@ Step-by-step guide to understanding n8n, self-hosting it locally or on Oracle Cl
 - [Running n8n in a Virtual Machine (Oracle Cloud)](#running-n8n-in-a-virtual-machine-oracle-cloud)
 - [Hands-on projects](Projects/readme.md)
   - [Project 1: AI Gmail Assistant](Projects/project1/readme.md)
-  - [Project 2: Meeting Notes Tracker](Projects/project2/readme.md)
-  - [Project 3: Jenkins Log Analyzer (LLM + RAG)](Projects/project3/readme.md)
+  - [Project 2: Gmail AI Assistant — Upgraded](Projects/project2/readme.md) 
+  - [Project 3: Meeting Notes Tracker](Projects/project3/readme.md)
+  - [Project 4: Jenkins Log Analyzer (LLM + RAG)](Projects/project4/readme.md)
 
 
 ## Introduction

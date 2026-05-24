@@ -1,143 +1,102 @@
-# Project 3: Jenkins Log Analyzer (LLM + RAG)
+# Project 2: Meeting Notes Tracker
 
-When a **Jenkins pipeline fails**, your pipeline (or a shared library) sends an **HTTP POST** to an n8n **Webhook** URL with the **console log** (and useful metadata). That starts an **AI Agent** configured as a **log-analysis expert** for your stack. The agent uses a **Simple Vector Store** tool backed by your **internal knowledge base** (runbooks, past incidents, architecture notes) so answers are **RAG-grounded**. It produces a **root-cause style analysis and proposed fix**, then uses the **Gmail tool** to email a **formatted report** to the **team lead** or to the **person who triggered the build** (when that address is present in the webhook payload).
+When a meeting ends, you save notes as a plain **`.txt`** file and upload it to a dedicated **Google Drive** folder. That upload is the **trigger**: n8n downloads the file, pulls out the text, sends it to an **LLM** to infer what was discussed, important **action items**, and **due dates** when mentioned. The workflow then **updates a Google Sheet** (your team’s running log) and **emails** the team lead or a fixed list of teammates so nothing falls through the cracks.
 
-A **second path** keeps the knowledge base fresh: either an **admin Webhook** you call after publishing new docs, or a **Google Drive trigger** when files are uploaded to a watched folder. Those paths **chunk text, run the same embedding model** as the retrieval tool, and **upsert** into the same vector store the analyzer queries.
-
-
-![Workflow overview](/.imgs/demo3.png)
+![Workflow overview](/.imgs/demo2.png)
 
 ---
 
 ## Workflow Overview
 
-### A — Failure analysis (Jenkins → Webhook)
-
 ```
-Jenkins (POST on failure: log + metadata)
-  → Webhook
-  → Set (normalize / map payload for the LLM)
-  → AI Agent (log expert system prompt + Simple Vector Store tool)
-  → Gmail (team lead and/or build initiator from payload)
-```
-
-### B — Knowledge base refresh (same embedding model as retrieval)
-
-Either:
-
-```
-Webhook (manual / CI “reindex”)
-  → … prepare documents …
-  → Embeddings
-  → Simple Vector Store (insert / upsert)
-```
-
-or:
-
-```
-Google Drive (file uploaded to KB folder)
+Google Drive (file uploaded to watch folder)
   → Download file
-  → Extract text
-  → (optional chunk / split)
-  → Embeddings
-  → Simple Vector Store (insert / upsert)
+  → Extract text from file
+  → AI Agent (summarize, tasks, dates)
+  → Google Sheets (append / update log)
+  → Gmail (notify team lead or distribution list)
 ```
 
-Use **one embedding model ID / credential** for both **ingestion (B)** and the **Vector Store tool attached to the agent (A)** so query vectors live in the same space as document vectors.
-
-Implementation detail: in n8n these are often **separate workflows** (one webhook URL for failures, one for indexing, one for Drive) — the diagram in [`.imgs/demo3.png`](../../.imgs/demo3.png) may show how yours are split.
+You can implement the last two steps either as **tools on the same AI Agent** (similar to how Project 1 attaches Gmail) or as **separate nodes** after an LLM node that returns structured JSON — both patterns work; the agent + tools layout stays closer to [Project 1](../project1/readme.md).
 
 ---
 
 ## Nodes
 
-### Reused from earlier projects (details there)
+### Reused from Project 1 (details there)
 
 | Piece | Where it’s explained |
 |--------|----------------------|
 | **AI Agent** (model, system prompt, tool loop) | [Project 1 — AI Agent](../project1/readme.md#2-ai-agent) |
-| **Gmail** (formatted email, OAuth2) | [Project 1 — Gmail tool](../project1/readme.md#3-gmail--send-email-tool) and [Gmail credentials](../project1/readme.md#setting-up-gmail-api-credentials) |
-| **Google Drive** (trigger, download, extract) | [Project 2 — Drive + file pipeline](../project2/readme.md#1-google-drive--trigger) through [Extract from File](../project2/readme.md#3-extract-from-file) |
+| **Gmail** (sending mail, OAuth2) | [Project 1 — Gmail tool](../project1/readme.md#3-gmail--send-email-tool) and [Gmail credential steps](../project1/readme.md#setting-up-gmail-api-credentials) |
 
-Configure the agent’s **system prompt** for your domain (e.g. Java/K8s/Docker at your org): require **sections** such as *Summary*, *Likely root cause*, *Evidence from log*, *Suggested fix*, *Queries for the vector store* when needed, and *Severity / next owner*.
-
----
-
-### 1. Webhook — Jenkins failure
-
-**Type:** Webhook (trigger)  
-Exposes a **POST** URL. Jenkins (HTTP Request step, `curl`, or a notifier plugin) sends JSON or raw text containing at least the **log tail or full log**, **job name**, **build number**, **build URL**, and ideally **`startedBy` / `userEmail`** for the person who initiated the build.
-
-**Security:** protect the URL (secret header, IP allowlist, or VPN-only n8n) so arbitrary callers cannot spam your LLM or inbox.
+Use a **system prompt** tailored to meetings: ask for a short summary, a bullet list of action items with owner if stated, due dates in ISO form when present, and a one-line “parking lot” for unclear items.
 
 ---
 
-### 2. Set
+### 1. Google Drive — Trigger
 
-**Type:** Set  
-Maps the webhook body into **stable field names** the AI Agent expects (e.g. `logText`, `jobName`, `buildUrl`, `recipientEmail`). Truncate or split very large logs here if your model context window requires it, and attach a pointer to full logs (S3/Jenkins artifact URL) in the email body when you truncate.
+**Type:** Google Drive (trigger)  
+Fires when a **new file** appears (or is updated, depending on the event you choose) inside a **specific folder** — the inbox where people upload meeting notes.
 
----
+Configure:
 
-### 3. Simple Vector Store (RAG tool)
+- **Folder** to watch (shared drive folder is fine if the credential has access)
+- **Event** — e.g. file created, or file updated if you use “save again” uploads
 
-**Type:** Simple Vector Store (LangChain / AI tool)  
-Attached to the **AI Agent** as a tool the model can call to **retrieve** snippets from your knowledge base. The store must be populated by workflow **B** (see above).
-
-**Critical:** use the **same embeddings configuration** (provider + model name + dimensions) for **ingestion** and **retrieval**, or similarity search will be meaningless.
+You need **Google Drive API** enabled and **OAuth2** credentials in Google Cloud (same project as Gmail/Sheets is convenient). In n8n, create a **Google Drive OAuth2** credential and attach it to this trigger.
 
 ---
 
-### 4. Embeddings (ingestion path)
+### 2. Google Drive — Download
 
-**Type:** Embeddings (e.g. OpenAI, Google, Cohere — per your n8n version)  
-Converts each text chunk into a vector before writing to the Simple Vector Store. Wire the **identical** embedding node (or sub-workflow) used when configuring the agent’s vector tool.
-
----
-
-### 5. Webhook — Reindex / vector store update
-
-**Type:** Webhook (second workflow or second path)  
-Lets CI or an admin **POST** new or replacement documents (or URLs to fetch) without using Drive. Often returns `202` quickly and processes async if reindexing is heavy.
+**Type:** Google Drive  
+Takes the file ID from the trigger output and **downloads the file** (binary) so the next node can read it. Use the same Drive credential as the trigger.
 
 ---
 
-### 6. Google Drive — KB uploads (optional second trigger)
+### 3. Extract from File
 
-**Type:** Google Drive trigger + Download + Extract  
-Same pattern as [Project 2](../project2/readme.md): uploads to a **KB-only** folder automatically flow into chunk → embed → vector store. Keep this folder separate from unrelated Drive automation.
+**Type:** Extract From File (or equivalent in your n8n version)  
+Turns the downloaded **`.txt`** (or other supported format) into **text** the LLM can consume. If the file is always UTF-8 plain text, this node should output a string field you map into the AI Agent’s user message (e.g. “Meeting notes below:\n…”).
 
 ---
 
-## Jenkins side (sketch)
+### 4. Google Sheets — Append or Update Row
 
-From a pipeline `post { failure { ... } }` (or equivalent), call your n8n webhook with a JSON body, for example:
+**Type:** Google Sheets  
+Writes structured results — for example **one row per meeting** with columns like `Date`, `Source file`, `Summary`, `Action items`, `Due dates`, `Raw notes link`.
 
-```json
-{
-  "jobName": "my-service",
-  "buildNumber": 42,
-  "buildUrl": "https://jenkins.example/job/my-service/42/",
-  "logText": "... last N KB of console output ...",
-  "startedByEmail": "developer@example.com"
-}
-```
+Enable the **Google Sheets API** on the same Google Cloud project, add the Sheets scope to your OAuth consent screen if needed, and use a **Google Sheets OAuth2** credential in n8n. You will need the **spreadsheet ID** (from the URL) and the **sheet name** or gid.
 
-Map `startedByEmail` (or a username resolved via Jenkins API) in the **Set** node so the **Gmail** tool can target the **build initiator**; fall back to a static **team lead** if the field is missing.
+If you use the **AI Agent with a Sheets tool**, configure the tool so the model can only touch that spreadsheet. If you use a **linear flow**, add a node that parses the LLM output (or use structured output / JSON mode) before mapping fields into **Append Row**.
+
+---
+
+### 5. Gmail — Notify team
+
+**Type:** Gmail  
+Sends a concise email to the **team lead** or a **static list** of addresses (BCC if you want privacy). Body can repeat the summary and link to the Drive file or Sheet row.
+
+Credential setup is the same as in Project 1 (OAuth2). You can reuse the existing Gmail credential if the same Google account is allowed to send to those recipients.
+
+---
+
+## Google Cloud checklist (this project)
+
+In addition to Gmail (Project 1), enable:
+
+| API | Purpose |
+|-----|--------|
+| **Google Drive API** | Trigger + download |
+| **Google Sheets API** | Log updates |
+
+Use one OAuth client or separate credentials per service, depending on how you prefer to scope permissions in n8n.
 
 ---
 
 ## Operational tips
 
-- **Log size** — Full logs can exceed context limits; summarize in **Set** or a dedicated “compress log” LLM step only if needed, and always keep **build URL** in the email.
-- **Vector hygiene** — Version or namespace documents (e.g. by `source_path`) so you can **delete/replace** stale chunks when runbooks change.
-- **Cost & rate limits** — Every failure triggers an LLM + possible multiple vector queries; add **deduplication** (same `buildUrl` within minutes) if jobs are flaky and noisy.
-- **Secrets** — Strip tokens and credentials from logs in **Set** before sending to the model or storing in email history.
-
----
-
-## Next steps
-
-1. Create the **Simple Vector Store** and run **workflow B** once with seed documents.  
-2. Wire **Jenkins POST** to the failure **Webhook** and validate **Set → Agent → Gmail** with a forced failure.  
-
+- **Folder discipline** — Only meeting notes go in the watched folder (or use a filename prefix / subfolder rule if you add a filter node).
+- **Idempotency** — Drive may emit more than one event for a single upload; consider a **dedupe** strategy (e.g. process file ID once via a small DB or sheet lookup) if you see duplicates.
+- **PII** — Notes may contain sensitive topics; align retention and Sheet access with your org policy.
